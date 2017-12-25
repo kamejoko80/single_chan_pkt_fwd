@@ -3,7 +3,7 @@
 
 CC=g++
 CFLAGS=-c -Wall
-LIBS=-lwiringPi
+LIBS=
 
 all: single_chan_pkt_fwd
 

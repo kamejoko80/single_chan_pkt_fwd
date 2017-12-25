@@ -7,11 +7,17 @@
  * which accompanies this distribution, and is available at
  * http://www.eclipse.org/legal/epl-v10.html
  *
+ * Change history:
+ *     Phuong Dang: 25-Dec-2017: Added support JF4418 
  *******************************************************************************/
 
 #include <string>
 #include <stdio.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
 #include <sys/types.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <string.h>
@@ -19,21 +25,19 @@
 #include <cstdlib>
 #include <sys/time.h>
 #include <cstring>
+#include <linux/spi/spidev.h>
 
 #include <sys/ioctl.h>
 #include <net/if.h>
 
-using namespace std;
-
 #include "base64.h"
 
-#include <wiringPi.h>
-#include <wiringPiSPI.h>
+using namespace std;
+
+#define delay(x) usleep(x)
 
 typedef bool boolean;
 typedef unsigned char byte;
-
-static const int CHANNEL = 0;
 
 byte currentMode = 0x81;
 
@@ -56,6 +60,8 @@ uint32_t cp_up_pkt_fwd;
 
 enum sf_t { SF7=7, SF8, SF9, SF10, SF11, SF12 };
 
+int fd;
+
 /*******************************************************************************
  *
  * Configure these values!
@@ -63,9 +69,9 @@ enum sf_t { SF7=7, SF8, SF9, SF10, SF11, SF12 };
  *******************************************************************************/
 
 // SX1272 - Raspberry connections
-int ssPin = 6;
-int dio0  = 7;
-int RST   = 0;
+#define NSS_PIN (32*2+30) // GPIOC_30
+#define RST_PIN (32*1+29) // GPIOB_29
+#define DIO_PIN (32*1+30) // GPIOB_30
 
 // Set spreading factor (SF7 - SF12)
 sf_t sf = SF7;
@@ -86,8 +92,8 @@ static char description[64] = "";                        /* used for free form d
 // define servers
 // TODO: use host names and dns
 #define SERVER1 "54.72.145.119"    // The Things Network: croft.thethings.girovito.nl
-//#define SERVER2 "192.168.1.10"      // local
-#define PORT 1700                   // The port on which to send data
+//#define SERVER2 "192.168.1.10"   // local
+#define PORT 1700                  // The port on which to send data
 
 // #############################################
 // #############################################
@@ -105,14 +111,14 @@ static char description[64] = "";                        /* used for free form d
 #define REG_MODEM_CONFIG            0x1D
 #define REG_MODEM_CONFIG2           0x1E
 #define REG_MODEM_CONFIG3           0x26
-#define REG_SYMB_TIMEOUT_LSB  		0x1F
-#define REG_PKT_SNR_VALUE			0x19
+#define REG_SYMB_TIMEOUT_LSB        0x1F
+#define REG_PKT_SNR_VALUE           0x19
 #define REG_PAYLOAD_LENGTH          0x22
 #define REG_IRQ_FLAGS_MASK          0x11
-#define REG_MAX_PAYLOAD_LENGTH 		0x23
+#define REG_MAX_PAYLOAD_LENGTH      0x23
 #define REG_HOP_PERIOD              0x24
-#define REG_SYNC_WORD				0x39
-#define REG_VERSION	  				0x42
+#define REG_SYNC_WORD               0x39
+#define REG_VERSION                 0x42
 
 #define SX72_MODE_RX_CONTINUOS      0x85
 #define SX72_MODE_TX                0x83
@@ -125,7 +131,7 @@ static char description[64] = "";                        /* used for free form d
 #define REG_LNA                     0x0C
 #define LNA_MAX_GAIN                0x23
 #define LNA_OFF_GAIN                0x00
-#define LNA_LOW_GAIN		    	0x20
+#define LNA_LOW_GAIN                0x20
 
 // CONF REG
 #define REG1                        0x0A
@@ -142,13 +148,13 @@ static char description[64] = "";                        /* used for free form d
 #define SX72_MC1_LOW_DATA_RATE_OPTIMIZE  0x01 // mandated for SF11 and SF12
 
 // FRF
-#define        REG_FRF_MSB              0x06
-#define        REG_FRF_MID              0x07
-#define        REG_FRF_LSB              0x08
+#define        REG_FRF_MSB          0x06
+#define        REG_FRF_MID          0x07
+#define        REG_FRF_LSB          0x08
 
-#define        FRF_MSB                  0xD9 // 868.1 Mhz
-#define        FRF_MID                  0x06
-#define        FRF_LSB                  0x66
+#define        FRF_MSB              0xD9 // 868.1 Mhz
+#define        FRF_MID              0x06
+#define        FRF_LSB              0x66
 
 #define BUFLEN 2048  //Max length of buffer
 
@@ -160,7 +166,84 @@ static char description[64] = "";                        /* used for free form d
 #define PKT_PULL_ACK  4
 
 #define TX_BUFF_SIZE  2048
-#define STATUS_SIZE	  1024
+#define STATUS_SIZE   1024
+
+void gpio_request(void)
+{
+    char buf[256];
+    int fd;
+
+    /* NSS pin request */
+    memset(buf, 0, 256);
+    fd = open("/sys/class/gpio/export", O_WRONLY);
+    sprintf(buf, "%d", NSS_PIN);
+    write(fd, buf, strlen(buf));
+    close(fd);
+
+    /* RST pin request */
+    memset(buf, 0, 256);
+    fd = open("/sys/class/gpio/export", O_WRONLY);
+    sprintf(buf, "%d", RST_PIN);
+    write(fd, buf, strlen(buf));
+    close(fd);
+
+     /* DIO0 pin request */
+    memset(buf, 0, 256);
+    fd = open("/sys/class/gpio/export", O_WRONLY);
+    sprintf(buf, "%d", DIO_PIN);
+    write(fd, buf, strlen(buf));
+    close(fd);
+}
+
+void gpio_set_dir(void)
+{
+    char buf[256];
+    int fd;
+
+    /* Set NSS output */
+    memset(buf, 0, 256);
+    sprintf(buf, "/sys/class/gpio/gpio%d/direction", NSS_PIN);
+    fd = open(buf, O_WRONLY);
+    write(fd, "out", 3);
+    close(fd);
+
+    /* Set RST output */
+    memset(buf, 0, 256);
+    sprintf(buf, "/sys/class/gpio/gpio%d/direction", RST_PIN);
+    fd = open(buf, O_WRONLY);
+    write(fd, "out", 3);
+    close(fd);
+
+    /* Set DIO0 input */
+    memset(buf, 0, 256);
+    sprintf(buf, "/sys/class/gpio/gpio%d/direction", DIO_PIN);
+    fd = open(buf, O_WRONLY);
+    write(fd, "in", 2);
+    close(fd);
+}
+
+char read_dio(void)
+{
+    char buf[256];
+    int fd;
+    char value, ret;
+
+    sprintf(buf, "/sys/class/gpio/gpio%d/value", DIO_PIN);
+    fd = open(buf, O_RDONLY);
+    read(fd, &value, 1);
+
+    ret = (value == '0') ? 0 : 1;
+
+    close(fd);
+
+    return ret;
+}
+
+void gpio_init(void)
+{
+    gpio_request();
+    gpio_set_dir();
+}
 
 void die(const char *s)
 {
@@ -168,45 +251,180 @@ void die(const char *s)
     exit(1);
 }
 
-void selectreceiver()
+void selectreceiver(void)
 {
-    digitalWrite(ssPin, LOW);
+    char buf[256];
+    int fd;
+
+    /* Control GPIO */
+    sprintf(buf, "/sys/class/gpio/gpio%d/value", NSS_PIN);
+    fd = open(buf, O_WRONLY);
+    write(fd, "0", 1);
+    close(fd);
 }
 
-void unselectreceiver()
+void unselectreceiver(void)
 {
-    digitalWrite(ssPin, HIGH);
+    char buf[256];
+    int fd;
+
+    /* Control GPIO */
+    sprintf(buf, "/sys/class/gpio/gpio%d/value", NSS_PIN);
+    fd = open(buf, O_WRONLY);
+    write(fd, "1", 1);
+    close(fd);
+}
+
+void reset_high_low(void)
+{
+    char buf[256];
+    int fd;
+
+    /* Control GPIO */
+    sprintf(buf, "/sys/class/gpio/gpio%d/value", RST_PIN);
+    fd = open(buf, O_WRONLY);
+
+    /* RST_PIN high */
+    write(fd, "1", 1);
+    delay(100);
+
+    /* RST_PIN low */
+    write(fd, "0", 1);
+    delay(100);
+
+    close(fd);
+}
+
+void reset_low_high(void)
+{
+    char buf[256];
+    int fd;
+
+    /* Control GPIO */
+    sprintf(buf, "/sys/class/gpio/gpio%d/value", RST_PIN);
+    fd = open(buf, O_WRONLY);
+
+    /* RST_PIN high */
+    write(fd, "0", 1);
+    delay(100);
+
+    /* RST_PIN low */
+    write(fd, "1", 1);
+    delay(100);
+
+    close(fd);
+}
+
+void spi_init(void)
+{
+    const char *name = "/dev/spidev0.0";
+    uint8_t mode = 0;
+    uint8_t bits = 8;
+    int ret = 0;
+
+    /* Open SPI */
+    fd = open(name, O_RDWR);
+    if (fd < 0) {
+        perror("open");
+        return;
+    }
+
+    ret = ioctl(fd, SPI_IOC_WR_MODE, &mode);
+    if (ret == -1)
+        perror("can't set spi mode WR");
+
+    ret = ioctl(fd, SPI_IOC_RD_MODE, &mode);
+    if (ret == -1)
+        perror("can't get spi mode RD");
+
+    /*
+     * bits per word
+     */
+    ret = ioctl(fd, SPI_IOC_WR_BITS_PER_WORD, &bits);
+    if (ret == -1)
+        perror("can't set bits per word WR");
+
+    ret = ioctl(fd, SPI_IOC_RD_BITS_PER_WORD, &bits);
+    if (ret == -1)
+        perror("can't get bits per word RD");
+
+    printf("SPI init sucessfully\r\n");
+
+}
+
+char spi_read(char addr)
+{
+    struct spi_ioc_transfer xfer[2];
+    int status;
+    char temp_addr = addr & 0x7F;
+    char value;
+
+    memset(xfer, 0, sizeof xfer);
+
+    /* Tx setting up */
+    xfer[0].tx_buf = (unsigned long)&temp_addr;
+    xfer[0].len = 1;
+
+    /* Rx setting up */
+    xfer[1].rx_buf = (unsigned long) &value;
+    xfer[1].len = 1; /* Length of Data to read */
+
+    status = ioctl(fd, SPI_IOC_MESSAGE(2), xfer);
+    if (status < 0) {
+        perror("SPI_IOC_MESSAGE");
+        return 0;
+    }
+
+    return value;
+}
+
+void spi_write(char addr, char value)
+{
+    struct spi_ioc_transfer xfer[2];
+    int status;
+    char buf[2];
+    char buf1[2];
+
+    memset(xfer, 0, sizeof xfer);
+
+    buf[0] = addr | 0x80;
+    buf[1] = value;
+
+    /* Tx setting up */
+    xfer[0].tx_buf = (unsigned long)buf;
+    xfer[0].len = 2;
+
+    /* Rx setting up */
+    xfer[1].rx_buf = (unsigned long)buf1;
+    xfer[1].len = 2;
+
+    status = ioctl(fd, SPI_IOC_MESSAGE(2), xfer);
+    if (status < 0) {
+        perror("SPI_IOC_MESSAGE");
+        return;
+    }
 }
 
 byte readRegister(byte addr)
 {
-    unsigned char spibuf[2];
+    byte value;
 
     selectreceiver();
-    spibuf[0] = addr & 0x7F;
-    spibuf[1] = 0x00;
-    wiringPiSPIDataRW(CHANNEL, spibuf, 2);
+    value = spi_read(addr);
     unselectreceiver();
 
-    return spibuf[1];
+    return value;
 }
 
 void writeRegister(byte addr, byte value)
 {
-    unsigned char spibuf[2];
-
-    spibuf[0] = addr | 0x80;
-    spibuf[1] = value;
     selectreceiver();
-    wiringPiSPIDataRW(CHANNEL, spibuf, 2);
-
+    spi_write(addr, value);
     unselectreceiver();
 }
 
-
 boolean receivePkt(char *payload)
 {
-
     // clear rxDone
     writeRegister(REG_IRQ_FLAGS, 0x40);
 
@@ -238,13 +456,10 @@ boolean receivePkt(char *payload)
     return true;
 }
 
+
 void SetupLoRa()
 {
-    
-    digitalWrite(RST, HIGH);
-    delay(100);
-    digitalWrite(RST, LOW);
-    delay(100);
+    reset_high_low();
 
     byte version = readRegister(REG_VERSION);
 
@@ -254,10 +469,7 @@ void SetupLoRa()
         sx1272 = true;
     } else {
         // sx1276?
-        digitalWrite(RST, LOW);
-        delay(100);
-        digitalWrite(RST, HIGH);
-        delay(100);
+        reset_low_high();
         version = readRegister(REG_VERSION);
         if (version == 0x12) {
             // sx1276
@@ -381,7 +593,7 @@ void receivepacket() {
     long int SNR;
     int rssicorr;
 
-    if(digitalRead(dio0) == 1)
+    if(read_dio() == 1)
     {
         if(receivePkt(message)) {
             byte value = readRegister(REG_PKT_SNR_VALUE);
@@ -396,7 +608,7 @@ void receivepacket() {
                 // Divide by 4
                 SNR = ( value & 0xFF ) >> 2;
             }
-            
+
             if (sx1272) {
                 rssicorr = 139;
             } else {
@@ -536,14 +748,9 @@ int main () {
     struct timeval nowtime;
     uint32_t lasttime;
 
-    wiringPiSetup () ;
-    pinMode(ssPin, OUTPUT);
-    pinMode(dio0, INPUT);
-    pinMode(RST, OUTPUT);
+    gpio_init();
 
-    //int fd = 
-    wiringPiSPISetup(CHANNEL, 500000);
-    //cout << "Init result: " << fd << endl;
+    spi_init();
 
     SetupLoRa();
 
