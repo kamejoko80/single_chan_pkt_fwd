@@ -87,7 +87,7 @@ int   alt=0;
 /* Informal status fields */
 static char platform[24]    = "Single Channel Gateway";  /* platform definition */
 static char email[40]       = "";                        /* used for contact email */
-static char description[64] = "";                        /* used for free form description */
+static char description[64] = "JF4418 Lora GW";          /* used for free form description */
 
 // define servers
 // TODO: use host names and dns
