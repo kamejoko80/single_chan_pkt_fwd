@@ -93,7 +93,7 @@ static char description[64] = "";                        /* used for free form d
 // TODO: use host names and dns
 #define SERVER1 "52.169.76.203"    // The Things Network: router.eu.thethings.network
 //#define SERVER2 "192.168.1.10"   // local
-#define PORT 1901                  // The port on which to send data
+#define PORT 1700                  // The port on which to send data
 
 // #############################################
 // #############################################
